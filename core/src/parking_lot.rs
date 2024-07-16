@@ -49,43 +49,9 @@ static NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
 /// Except for the initial value of null, it must always point to a valid `HashTable` instance.
 /// Any `HashTable` this global static has ever pointed to must never be freed.
 
-#[cfg(feature = "import-globals")]
-mod its_safe_i_promise {
-    pub(super) struct MakeExternStaticSafe<T: 'static>(&'static T);
-
-    use std::ops::Deref;
-
-    impl<T: 'static> MakeExternStaticSafe<T> {
-        pub(super) const fn new(t: &'static T) -> Self {
-            Self(t)
-        }
-    }
-
-    impl<T> Deref for MakeExternStaticSafe<T> {
-        type Target = T;
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
+rubicon::process_local! {
+    static PARKING_LOT_HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
 }
-
-#[cfg(feature = "import-globals")]
-extern "C" {
-    #[link_name = "PARKING_LOT_HASHTABLE"]
-    #[allow(improper_ctypes)]
-    static PARKING_LOT_HASHTABLE_STATIC: AtomicPtr<HashTable>;
-}
-
-#[cfg(feature = "import-globals")]
-static PARKING_LOT_HASHTABLE: its_safe_i_promise::MakeExternStaticSafe<AtomicPtr<HashTable>> =
-    unsafe { its_safe_i_promise::MakeExternStaticSafe::new(&PARKING_LOT_HASHTABLE_STATIC) };
-
-#[cfg(feature = "export-globals")]
-#[no_mangle]
-pub static PARKING_LOT_HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
-
-#[cfg(not(any(feature = "import-globals", feature = "export-globals")))]
-static PARKING_LOT_HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
 
 // Even with 3x more buckets than threads, the memory overhead per thread is
 // still only a few hundred bytes per thread.
@@ -266,9 +232,9 @@ fn get_hashtable() -> &'static HashTable {
         unsafe { &*table }
     };
 
-    crate::soprintln!(
+    rubicon::soprintln!(
         "get_hashtable {}",
-        crate::AddrColor::new("get_hashtable", ret as *const _ as u64)
+        rubicon::Beacon::from_ref("get_hashtable", ret)
     );
     ret
 }
