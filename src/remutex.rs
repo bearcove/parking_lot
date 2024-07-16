@@ -12,15 +12,16 @@ use lock_api::{self, GetThreadId};
 /// Implementation of the `GetThreadId` trait for `lock_api::ReentrantMutex`.
 pub struct RawThreadId;
 
+// The address of a thread-local variable is guaranteed to be unique to the
+// current thread, and is also guaranteed to be non-zero. The variable has to have a
+// non-zero size to guarantee it has a unique address for each thread.
+rubicon::thread_local!(static REMUTEX_KEY: u8 = 0);
+
 unsafe impl GetThreadId for RawThreadId {
     const INIT: RawThreadId = RawThreadId;
 
     fn nonzero_thread_id(&self) -> NonZeroUsize {
-        // The address of a thread-local variable is guaranteed to be unique to the
-        // current thread, and is also guaranteed to be non-zero. The variable has to have a
-        // non-zero size to guarantee it has a unique address for each thread.
-        thread_local!(static KEY: u8 = 0);
-        KEY.with(|x| {
+        REMUTEX_KEY.with(|x| {
             NonZeroUsize::new(x as *const _ as usize)
                 .expect("thread-local variable address is null")
         })
