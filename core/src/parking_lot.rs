@@ -48,7 +48,44 @@ static NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Except for the initial value of null, it must always point to a valid `HashTable` instance.
 /// Any `HashTable` this global static has ever pointed to must never be freed.
-static HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
+
+#[cfg(feature = "import-globals")]
+mod its_safe_i_promise {
+    pub(super) struct MakeExternStaticSafe<T: 'static>(&'static T);
+
+    use std::ops::Deref;
+
+    impl<T: 'static> MakeExternStaticSafe<T> {
+        pub(super) const fn new(t: &'static T) -> Self {
+            Self(t)
+        }
+    }
+
+    impl<T> Deref for MakeExternStaticSafe<T> {
+        type Target = T;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+}
+
+#[cfg(feature = "import-globals")]
+extern "C" {
+    #[link_name = "PARKING_LOT_HASHTABLE"]
+    #[allow(improper_ctypes)]
+    static PARKING_LOT_HASHTABLE_STATIC: AtomicPtr<HashTable>;
+}
+
+#[cfg(feature = "import-globals")]
+static PARKING_LOT_HASHTABLE: its_safe_i_promise::MakeExternStaticSafe<AtomicPtr<HashTable>> =
+    unsafe { its_safe_i_promise::MakeExternStaticSafe::new(&PARKING_LOT_HASHTABLE_STATIC) };
+
+#[cfg(feature = "export-globals")]
+#[no_mangle]
+pub static PARKING_LOT_HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
+
+#[cfg(not(any(feature = "import-globals", feature = "export-globals")))]
+static PARKING_LOT_HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
 
 // Even with 3x more buckets than threads, the memory overhead per thread is
 // still only a few hundred bytes per thread.
@@ -219,15 +256,21 @@ impl Drop for ThreadData {
 /// at any point. Meaning it still exists, but it is not the instance in active use.
 #[inline]
 fn get_hashtable() -> &'static HashTable {
-    let table = HASHTABLE.load(Ordering::Acquire);
+    let table = PARKING_LOT_HASHTABLE.load(Ordering::Acquire);
 
     // If there is no table, create one
-    if table.is_null() {
+    let ret = if table.is_null() {
         create_hashtable()
     } else {
-        // SAFETY: when not null, `HASHTABLE` always points to a `HashTable` that is never freed.
+        // SAFETY: when not null, `PARKING_LOT_HASHTABLE` always points to a `HashTable` that is never freed.
         unsafe { &*table }
-    }
+    };
+
+    crate::soprintln!(
+        "get_hashtable {}",
+        crate::AddrColor::new("get_hashtable", ret as *const _ as u64)
+    );
+    ret
 }
 
 /// Returns a reference to the latest hash table, creating one if it doesn't exist yet.
@@ -238,7 +281,7 @@ fn create_hashtable() -> &'static HashTable {
     let new_table = Box::into_raw(HashTable::new(LOAD_FACTOR, ptr::null()));
 
     // If this fails then it means some other thread created the hash table first.
-    let table = match HASHTABLE.compare_exchange(
+    let table = match PARKING_LOT_HASHTABLE.compare_exchange(
         ptr::null_mut(),
         new_table,
         Ordering::AcqRel,
@@ -255,7 +298,7 @@ fn create_hashtable() -> &'static HashTable {
         }
     };
     // SAFETY: The `HashTable` behind `table` is never freed. It is either the table pointer we
-    // created here, or it is one loaded from `HASHTABLE`.
+    // created here, or it is one loaded from `PARKING_LOT_HASHTABLE`.
     unsafe { &*table }
 }
 
@@ -278,9 +321,9 @@ fn grow_hashtable(num_threads: usize) {
         }
 
         // Now check if our table is still the latest one. Another thread could
-        // have grown the hash table between us reading HASHTABLE and locking
+        // have grown the hash table between us reading PARKING_LOT_HASHTABLE and locking
         // the buckets.
-        if HASHTABLE.load(Ordering::Relaxed) == table as *const _ as *mut _ {
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == table as *const _ as *mut _ {
             break table;
         }
 
@@ -305,7 +348,7 @@ fn grow_hashtable(num_threads: usize) {
     // Publish the new table. No races are possible at this point because
     // any other thread trying to grow the hash table is blocked on the bucket
     // locks in the old table.
-    HASHTABLE.store(Box::into_raw(new_table), Ordering::Release);
+    PARKING_LOT_HASHTABLE.store(Box::into_raw(new_table), Ordering::Release);
 
     // Unlock all buckets in the old table
     for bucket in &old_table.entries[..] {
@@ -368,7 +411,7 @@ fn lock_bucket(key: usize) -> &'static Bucket {
 
         // If no other thread has rehashed the table before we grabbed the lock
         // then we are good to go! The lock we grabbed prevents any rehashes.
-        if HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
             return bucket;
         }
 
@@ -396,7 +439,7 @@ fn lock_bucket_checked(key: &AtomicUsize) -> (usize, &'static Bucket) {
         // Check that both the hash table and key are correct while the bucket
         // is locked. Note that the key can't change once we locked the proper
         // bucket for it, so we just keep trying until we have the correct key.
-        if HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _
             && key.load(Ordering::Relaxed) == current_key
         {
             return (current_key, bucket);
@@ -433,7 +476,7 @@ fn lock_bucket_pair(key1: usize, key2: usize) -> (&'static Bucket, &'static Buck
 
         // If no other thread has rehashed the table before we grabbed the lock
         // then we are good to go! The lock we grabbed prevents any rehashes.
-        if HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
             // Now lock the second bucket and return the two buckets
             if hash1 == hash2 {
                 return (bucket1, bucket1);
