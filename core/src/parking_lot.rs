@@ -42,14 +42,13 @@ cfg_if::cfg_if! {
 
 static NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
 
-/// Holds the pointer to the currently active `HashTable`.
-///
-/// # Safety
-///
-/// Except for the initial value of null, it must always point to a valid `HashTable` instance.
-/// Any `HashTable` this global static has ever pointed to must never be freed.
-
 rubicon::process_local! {
+    /// Holds the pointer to the currently active `HashTable`.
+    ///
+    /// # Safety
+    ///
+    /// Except for the initial value of null, it must always point to a valid `HashTable` instance.
+    /// Any `HashTable` this global static has ever pointed to must never be freed.
     static PARKING_LOT_HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
 }
 
