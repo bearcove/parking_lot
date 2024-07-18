@@ -9,7 +9,7 @@ impl Drop for Bar {
     }
 }
 
-thread_local! {
+rubicon::thread_local! {
     static B: Bar = Bar(RwLock::new(()));
 }
 

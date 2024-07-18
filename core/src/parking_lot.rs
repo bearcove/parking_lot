@@ -40,15 +40,17 @@ cfg_if::cfg_if! {
     }
 }
 
-static NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
+rubicon::process_local! {
+    static PARKING_LOT_NUM_THREADS: AtomicUsize = AtomicUsize::new(0);
 
-/// Holds the pointer to the currently active `HashTable`.
-///
-/// # Safety
-///
-/// Except for the initial value of null, it must always point to a valid `HashTable` instance.
-/// Any `HashTable` this global static has ever pointed to must never be freed.
-static HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
+    /// Holds the pointer to the currently active `HashTable`.
+    ///
+    /// # Safety
+    ///
+    /// Except for the initial value of null, it must always point to a valid `HashTable` instance.
+    /// Any `HashTable` this global static has ever pointed to must never be freed.
+    static PARKING_LOT_HASHTABLE: AtomicPtr<HashTable> = AtomicPtr::new(ptr::null_mut());
+}
 
 // Even with 3x more buckets than threads, the memory overhead per thread is
 // still only a few hundred bytes per thread.
@@ -176,7 +178,7 @@ impl ThreadData {
     fn new() -> ThreadData {
         // Keep track of the total number of live ThreadData objects and resize
         // the hash table accordingly.
-        let num_threads = NUM_THREADS.fetch_add(1, Ordering::Relaxed) + 1;
+        let num_threads = PARKING_LOT_NUM_THREADS.fetch_add(1, Ordering::Relaxed) + 1;
         grow_hashtable(num_threads);
 
         ThreadData {
@@ -199,8 +201,8 @@ fn with_thread_data<T>(f: impl FnOnce(&ThreadData) -> T) -> T {
     // to construct. Try to use a thread-local version if possible. Otherwise just
     // create a ThreadData on the stack
     let mut thread_data_storage = None;
-    thread_local!(static THREAD_DATA: ThreadData = ThreadData::new());
-    let thread_data_ptr = THREAD_DATA
+    rubicon::thread_local!(static PARKING_LOT_THREAD_DATA: ThreadData = ThreadData::new());
+    let thread_data_ptr = PARKING_LOT_THREAD_DATA
         .try_with(|x| x as *const ThreadData)
         .unwrap_or_else(|_| thread_data_storage.get_or_insert_with(ThreadData::new));
 
@@ -209,7 +211,7 @@ fn with_thread_data<T>(f: impl FnOnce(&ThreadData) -> T) -> T {
 
 impl Drop for ThreadData {
     fn drop(&mut self) {
-        NUM_THREADS.fetch_sub(1, Ordering::Relaxed);
+        PARKING_LOT_NUM_THREADS.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -218,7 +220,7 @@ impl Drop for ThreadData {
 /// at any point. Meaning it still exists, but it is not the instance in active use.
 #[inline]
 fn get_hashtable() -> &'static HashTable {
-    let table = HASHTABLE.load(Ordering::Acquire);
+    let table = PARKING_LOT_HASHTABLE.load(Ordering::Acquire);
 
     // If there is no table, create one
     if table.is_null() {
@@ -237,7 +239,7 @@ fn create_hashtable() -> &'static HashTable {
     let new_table = Box::into_raw(HashTable::new(LOAD_FACTOR, ptr::null()));
 
     // If this fails then it means some other thread created the hash table first.
-    let table = match HASHTABLE.compare_exchange(
+    let table = match PARKING_LOT_HASHTABLE.compare_exchange(
         ptr::null_mut(),
         new_table,
         Ordering::AcqRel,
@@ -279,7 +281,7 @@ fn grow_hashtable(num_threads: usize) {
         // Now check if our table is still the latest one. Another thread could
         // have grown the hash table between us reading HASHTABLE and locking
         // the buckets.
-        if HASHTABLE.load(Ordering::Relaxed) == table as *const _ as *mut _ {
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == table as *const _ as *mut _ {
             break table;
         }
 
@@ -304,7 +306,7 @@ fn grow_hashtable(num_threads: usize) {
     // Publish the new table. No races are possible at this point because
     // any other thread trying to grow the hash table is blocked on the bucket
     // locks in the old table.
-    HASHTABLE.store(Box::into_raw(new_table), Ordering::Release);
+    PARKING_LOT_HASHTABLE.store(Box::into_raw(new_table), Ordering::Release);
 
     // Unlock all buckets in the old table
     for bucket in &old_table.entries[..] {
@@ -367,7 +369,7 @@ fn lock_bucket(key: usize) -> &'static Bucket {
 
         // If no other thread has rehashed the table before we grabbed the lock
         // then we are good to go! The lock we grabbed prevents any rehashes.
-        if HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
             return bucket;
         }
 
@@ -395,7 +397,7 @@ fn lock_bucket_checked(key: &AtomicUsize) -> (usize, &'static Bucket) {
         // Check that both the hash table and key are correct while the bucket
         // is locked. Note that the key can't change once we locked the proper
         // bucket for it, so we just keep trying until we have the correct key.
-        if HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _
             && key.load(Ordering::Relaxed) == current_key
         {
             return (current_key, bucket);
@@ -432,7 +434,7 @@ fn lock_bucket_pair(key1: usize, key2: usize) -> (&'static Bucket, &'static Buck
 
         // If no other thread has rehashed the table before we grabbed the lock
         // then we are good to go! The lock we grabbed prevents any rehashes.
-        if HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
+        if PARKING_LOT_HASHTABLE.load(Ordering::Relaxed) == hashtable as *const _ as *mut _ {
             // Now lock the second bucket and return the two buckets
             if hash1 == hash2 {
                 return (bucket1, bucket1);
@@ -1147,7 +1149,9 @@ pub mod deadlock {
 
 #[cfg(feature = "deadlock_detection")]
 mod deadlock_impl {
-    use super::{get_hashtable, lock_bucket, with_thread_data, ThreadData, NUM_THREADS};
+    use super::{
+        get_hashtable, lock_bucket, with_thread_data, ThreadData, PARKING_LOT_NUM_THREADS,
+    };
     use crate::thread_parker::{ThreadParkerT, UnparkHandleT};
     use crate::word_lock::WordLock;
     use backtrace::Backtrace;
@@ -1258,7 +1262,7 @@ mod deadlock_impl {
     // This variant isn't precise as it doesn't lock the entire table before checking
     unsafe fn check_wait_graph_fast() -> bool {
         let table = get_hashtable();
-        let thread_count = NUM_THREADS.load(Ordering::Relaxed);
+        let thread_count = PARKING_LOT_NUM_THREADS.load(Ordering::Relaxed);
         let mut graph = DiGraphMap::<usize, ()>::with_capacity(thread_count * 2, thread_count * 2);
 
         for b in &(*table).entries[..] {
@@ -1296,7 +1300,9 @@ mod deadlock_impl {
     // Returns all detected thread wait cycles.
     // Note that once a cycle is reported it's never reported again.
     unsafe fn check_wait_graph_slow() -> Vec<Vec<DeadlockedThread>> {
-        static DEADLOCK_DETECTION_LOCK: WordLock = WordLock::new();
+        rubicon::process_local! {
+            static DEADLOCK_DETECTION_LOCK: WordLock = WordLock::new();
+        }
         DEADLOCK_DETECTION_LOCK.lock();
 
         let mut table = get_hashtable();
@@ -1322,7 +1328,7 @@ mod deadlock_impl {
             table = new_table;
         }
 
-        let thread_count = NUM_THREADS.load(Ordering::Relaxed);
+        let thread_count = PARKING_LOT_NUM_THREADS.load(Ordering::Relaxed);
         let mut graph =
             DiGraphMap::<WaitGraphNode, ()>::with_capacity(thread_count * 2, thread_count * 2);
 
