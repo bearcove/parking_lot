@@ -65,3 +65,13 @@ pub use self::parking_lot::{
 };
 pub use self::parking_lot::{DEFAULT_PARK_TOKEN, DEFAULT_UNPARK_TOKEN};
 pub use self::spinwait::SpinWait;
+
+rubicon::compatibility_check! {
+    ("version", env!("CARGO_PKG_VERSION")),
+
+    #[cfg(feature = "nightly")]
+    ("nightly", "enabled"),
+
+    #[cfg(feature = "deadlock_detection")]
+    ("deadlock_detection", "enabled"),
+}

@@ -56,4 +56,32 @@ pub use self::rwlock::{
 pub use ::lock_api;
 
 #[cfg(feature = "arc_lock")]
-pub use self::lock_api::{ArcMutexGuard, ArcReentrantMutexGuard, ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard, ArcRwLockWriteGuard};
+pub use self::lock_api::{
+    ArcMutexGuard, ArcReentrantMutexGuard, ArcRwLockReadGuard, ArcRwLockUpgradableReadGuard,
+    ArcRwLockWriteGuard,
+};
+
+rubicon::compatibility_check! {
+    ("version", env!("CARGO_PKG_VERSION")),
+
+    #[cfg(feature = "arc_lock")]
+    ("arc_lock", "enabled"),
+
+    #[cfg(feature = "owning_ref")]
+    ("owning_ref", "enabled"),
+
+    #[cfg(feature = "nightly")]
+    ("nightly", "enabled"),
+
+    #[cfg(feature = "deadlock_detection")]
+    ("deadlock_detection", "enabled"),
+
+    #[cfg(feature = "serde")]
+    ("serde", "enabled"),
+
+    #[cfg(feature = "send_guard")]
+    ("send_guard", "enabled"),
+
+    #[cfg(feature = "hardware-lock-elision")]
+    ("hardware-lock-elision", "enabled"),
+}
