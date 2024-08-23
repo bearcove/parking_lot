@@ -20,7 +20,9 @@ enum Backend {
     WaitAddress(waitaddress::WaitAddress),
 }
 
-static BACKEND: AtomicPtr<Backend> = AtomicPtr::new(ptr::null_mut());
+rubicon::process_local! {
+    static BACKEND: AtomicPtr<Backend> = AtomicPtr::new(ptr::null_mut());
+}
 
 impl Backend {
     #[inline]
